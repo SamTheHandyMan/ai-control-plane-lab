@@ -173,3 +173,11 @@ Each line is already a fact table row: `(timestamp, user, use_case, team, provid
 **How I'd explain it in an interview**
 
 Every request through the gateway produces one structured log line with who, what for, provider, model, tokens, latency, fallback and guardrail outcome, and I made the attribution tags mandatory with a guardrail so no spend is unowned. That line is the raw material for cost-per-use-case dashboards, chargeback, budget alerts and provider health, all without touching application code. I also found that guardrail denials default to triggering fallback, which has to be switched off explicitly.
+
+### Step 1.6 — Five sentences on what I saw (evening 1)
+
+1. I ran the open-source Portkey gateway locally with `npx`, pointed the stock OpenAI Python SDK at it, and sent requests to Groq and Gemini by changing only a header or a config, never the application code.
+2. I put Groq and Gemini behind one fallback config with retries and a timeout, poisoned the Groq key, and watched the client get a normal 200 served by Gemini; the only evidence was in the gateway log, where the request model and the response model no longer matched.
+3. I attached a pre-request regex guardrail that denied a prompt containing an email address in 1 ms without the provider ever being called, and a post-response JSON-schema guardrail that withheld a reply whose keys had drifted from the contract.
+4. I made `_user` and `use_case` tags mandatory with a metadata guardrail and tailed the gateway's log stream to print one line per request with who, provider, model, tokens, latency, which target served it, whether fallback fired, and which guardrail denied it.
+5. Along the way I found that guardrail denials trigger fallback unless `on_status_codes` is set explicitly, and that the local log entries contain provider API keys in plaintext, so the gateway's logs are a secret-bearing system that needs redaction and access control before production.
