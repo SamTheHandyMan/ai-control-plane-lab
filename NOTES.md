@@ -65,3 +65,37 @@ Script: stock `openai` SDK with `base_url="http://localhost:8787/v1"`, `api_key=
 **How I'd explain it in an interview**
 
 Unified API: the app speaks one request shape and changes nothing when the provider changes; the gateway owns the translation. I proved it by sending an OpenAI-SDK request to a Groq model through a local gateway with a single header to pick the provider.
+
+### Step 1.3 — Routing config: fallback, retries, timeout
+
+Docs used: config object schema (portkey.ai/docs/api-reference/inference-api/config-object), fallbacks, automatic-retries and request-timeouts pages under portkey.ai/docs/product/ai-gateway, Gemini model list (ai.google.dev/gemini-api/docs/models).
+
+**Files:** `evening1-gateway/fallback_config.json` (two targets: groq → google, `strategy.mode: fallback`, `retry.attempts: 2` on 429/5xx, `request_timeout: 10000`), `evening1-gateway/fallback_request.py`. The JSON holds `${GROQ_API_KEY}` placeholders filled from `.env` at runtime; the config is sent inline in the `x-portkey-config` header. The client sends a dummy API key and no provider header: provider, model and key all live in the config now.
+
+**Commands**
+
+```powershell
+.\.venv\Scripts\python.exe fallback_request.py              # run 1: served by openai/gpt-oss-20b (groq)
+$env:GROQ_API_KEY = "gsk_this_is_deliberately_wrong"        # poison groq key for this shell only
+.\.venv\Scripts\python.exe fallback_request.py              # run 2: served by gemini-3.5-flash-lite (google)
+Remove-Item Env:GROQ_API_KEY                                # restore
+```
+
+**What happened**
+
+- Run 1: Groq served it, 78 / 26 tokens.
+- Run 2: Groq rejected the bad key (401, not a retry code, so no backoff wasted), the gateway moved to target 2, Gemini answered. Client saw a normal 200 and never knew.
+- Fingerprints of the fallback in the console entry: request logged with `model: openai/gpt-oss-20b` (target 1's override) but response `model: gemini-3.5-flash-lite`, `provider: google`; duration 1313 ms vs ~400 ms (includes the failed first attempt); response id `portkey-...` instead of Groq's `chatcmpl-...` because the gateway synthesised an OpenAI-shaped response from Gemini's native format.
+- Token counts are not comparable across providers: same prompt was 78 tokens on Groq (chat-template overhead counted) and 8 on Gemini. Cost dashboards must price per provider, never compare raw token totals.
+- Limitation of the OSS console: one log entry per request showing the final provider. Hosted Portkey shows the full attempt chain; here you infer it from the mismatch above.
+
+**Routing strategies, where each is used**
+
+- **Fallback** (what we ran): ordered list, next target only when the current one fails. Resilience against provider outages, rate limits, key rotation mistakes.
+- **Load balance**: weighted split across targets on every request. Spread spend across accounts/regions, stay under per-key rate limits, or mix a cheap and a strong model.
+- **Conditional**: route by request metadata (team, data classification, user tier). The enterprise workhorse: "regulated data → in-region Azure OpenAI; everything else → cheapest provider".
+- **Canary**: load balance with a small weight (e.g. 5%) to a new model/provider while watching evals and latency, then ramp. How model upgrades are promoted without a big-bang switch.
+
+**How I'd explain it in an interview**
+
+I put Groq and Gemini behind one fallback config with retries and a timeout, then poisoned the Groq key; the client got a 200 served by Gemini and never changed a line. The value is that resilience, provider choice and keys became a config the platform team owns, not code every app team maintains.

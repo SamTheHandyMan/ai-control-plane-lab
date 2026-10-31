@@ -1,0 +1,17 @@
+{
+  "strategy": { "mode": "fallback" },
+  "request_timeout": 10000,
+  "retry": { "attempts": 2, "on_status_codes": [429, 500, 502, 503, 504] },
+  "targets": [
+    {
+      "provider": "groq",
+      "api_key": "${GROQ_API_KEY}",
+      "override_params": { "model": "openai/gpt-oss-20b" }
+    },
+    {
+      "provider": "google",
+      "api_key": "${GOOGLE_API_KEY}",
+      "override_params": { "model": "gemini-3.5-flash-lite" }
+    }
+  ]
+}
