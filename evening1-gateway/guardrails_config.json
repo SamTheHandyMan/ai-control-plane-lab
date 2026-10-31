@@ -1,0 +1,46 @@
+{
+  "provider": "groq",
+  "api_key": "${GROQ_API_KEY}",
+  "override_params": { "model": "openai/gpt-oss-20b" },
+
+  "before_request_hooks": [
+    {
+      "type": "guardrail",
+      "id": "block-email-pii",
+      "deny": true,
+      "checks": [
+        {
+          "id": "default.regexMatch",
+          "parameters": {
+            "rule": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+            "not": true
+          }
+        }
+      ]
+    }
+  ],
+
+  "after_request_hooks": [
+    {
+      "type": "guardrail",
+      "id": "require-product-json",
+      "deny": true,
+      "checks": [
+        {
+          "id": "default.jsonSchema",
+          "parameters": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "product": { "type": "string" },
+                "owner":   { "type": "string" }
+              },
+              "required": ["product", "owner"],
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

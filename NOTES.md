@@ -99,3 +99,39 @@ Remove-Item Env:GROQ_API_KEY                                # restore
 **How I'd explain it in an interview**
 
 I put Groq and Gemini behind one fallback config with retries and a timeout, then poisoned the Groq key; the client got a 200 served by Gemini and never changed a line. The value is that resilience, provider choice and keys became a config the platform team owns, not code every app team maintains.
+
+### Step 1.4 — Guardrail hooks
+
+Docs used: gateway `plugins/default/manifest.json` (check ids and parameters), portkey.ai/docs/product/guardrails (200 / 246 / 446 semantics), creating-raw-guardrails-in-json (hook shape), and the plugin sources `regexMatch.ts`, `jsonSchema.ts`, `plugins/utils.ts` (regex runs on the LAST message only; verdict = "matched", inverted with `not`; JSON is extracted from a code fence or the first `{...}` and validated with draft 2020-12).
+
+**Files:** `evening1-gateway/guardrails_config.json`, `evening1-gateway/guardrails_request.py pass|pii|badjson`.
+
+- `before_request_hooks`: `default.regexMatch` with an email regex and `not: true`, `deny: true`. Passes when no email present.
+- `after_request_hooks`: `default.jsonSchema` requiring exactly `{"product": str, "owner": str}` (`additionalProperties: false`), `deny: true`.
+
+**What happened**
+
+| scenario | status | duration | provider called? | evidence |
+|---|---|---|---|---|
+| pass | 200 | 520 ms | yes | both hooks `verdict: true`; `hook_results` attached to a normal response |
+| pii | 446 | **1 ms** | **no** | `after_request_hooks: []`, `matchedText: jane.doe@example.com`; PII never left the network |
+| badjson | 446 | 468 ms | yes, response withheld | `validationErrors`: missing `product`/`owner`, extra `name`/`team`/`sla` |
+
+- Pre-request denial is free (1 ms, zero tokens). Post-response denial still costs the provider call; it protects consumers, not the budget.
+- The denied email still appears in the gateway log (`textExcerpt`). Blocking at the gateway protects the provider boundary, not the log store; a real PII guardrail also redacts before logging.
+- In the "pass" run, 145 of 168 completion tokens were hidden reasoning about the output format. Strict-format prompts are not free on reasoning models.
+- The client sees 446 with a structured `hook_results` body, so an app can tell "blocked by policy" from "provider error" and show the right message.
+
+**Why a fixed set of JSON keys**
+
+The model's output is an API contract for the code that consumes it: a parser, a database insert, a UI card. If a prompt edit or a model swap changes `owner` to `team`, nothing errors at the model; the consumer breaks later, possibly silently (nulls in a table). A schema check at the gateway turns that into a loud 446 at the moment of the change, and because it lives in the gateway it holds across every provider and every model version. Providers offer native structured outputs (`response_format: json_schema`) which are better when available; the gateway check is the provider-agnostic backstop, and the only option when the provider has no such feature.
+
+**Why guardrails live in the gateway, and how they tier**
+
+- Every team inherits them without writing code; a new rule (block a new PII pattern, ban a model) ships once, centrally, instantly.
+- They are enforced, not optional: an app cannot forget to call the guardrail library because it never sees the provider.
+- Tiering by data classification is done with conditional routing + metadata: public data → cheap model, light checks; internal → PII block + logging; confidential/regulated → in-region provider, PII redaction, output schema, no prompt logging, human approval for side effects. The gateway reads the classification from request metadata (step 1.5) and applies the matching config.
+
+**How I'd explain it in an interview**
+
+I ran a pre-request regex guardrail that denied a prompt containing an email in 1 ms without calling the provider, and a post-response JSON-schema guardrail that withheld a response whose keys had drifted from the contract. Guardrails belong in the gateway because that is the one place every team's traffic already passes through, so policy is inherited, not opted into.
