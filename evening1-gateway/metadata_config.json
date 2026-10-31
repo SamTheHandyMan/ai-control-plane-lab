@@ -1,0 +1,26 @@
+{
+  "strategy": {
+    "mode": "fallback",
+    "on_status_codes": [408, 429, 500, 502, 503, 504]
+  },
+  "request_timeout": 10000,
+
+  "before_request_hooks": [
+    {
+      "type": "guardrail",
+      "id": "require-attribution-tags",
+      "deny": true,
+      "checks": [
+        {
+          "id": "default.requiredMetadataKeys",
+          "parameters": { "metadataKeys": ["_user", "use_case"], "operator": "all" }
+        }
+      ]
+    }
+  ],
+
+  "targets": [
+    { "provider": "groq",   "api_key": "${GROQ_API_KEY}",   "override_params": { "model": "openai/gpt-oss-20b" } },
+    { "provider": "google", "api_key": "${GOOGLE_API_KEY}", "override_params": { "model": "gemini-3.5-flash-lite" } }
+  ]
+}

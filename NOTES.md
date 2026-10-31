@@ -135,3 +135,41 @@ The model's output is an API contract for the code that consumes it: a parser, a
 **How I'd explain it in an interview**
 
 I ran a pre-request regex guardrail that denied a prompt containing an email in 1 ms without calling the provider, and a post-response JSON-schema guardrail that withheld a response whose keys had drifted from the contract. Guardrails belong in the gateway because that is the one place every team's traffic already passes through, so policy is inherited, not opted into.
+
+### Step 1.5 — Metadata and reading the logs like an operator
+
+Docs used: portkey.ai/docs/product/observability/metadata (`x-portkey-metadata` JSON header, string values ≤128 chars, special `_user` key; OpenAI body `user` is mapped to `_user`), plugin source `requiredMetadataKeys.ts` (`metadataKeys`, `operator: all|any|none`, before-request only), and the installed gateway build: the console is fed by server-sent events at `GET /log/stream`, one entry per request `{time, method, endpoint, status, duration, requestOptions[]}` with one element in `requestOptions` per target attempted.
+
+**Files:** `evening1-gateway/metadata_config.json` (fallback + a `default.requiredMetadataKeys` guardrail that denies requests missing `_user` or `use_case`), `evening1-gateway/metadata_request.py tagged|untagged`, `evening1-gateway/read_logs.py` (tails `/log/stream`, prints one operator line per request).
+
+**Commands**
+
+```powershell
+.\.venv\Scripts\python.exe read_logs.py                 # terminal 3, leave running
+.\.venv\Scripts\python.exe metadata_request.py tagged   # 200
+.\.venv\Scripts\python.exe metadata_request.py untagged # 446 require-attribution-tags
+.\.venv\Scripts\python.exe guardrails_request.py pii    # 446 block-email-pii
+$env:GROQ_API_KEY = "gsk_wrong"; .\.venv\Scripts\python.exe fallback_request.py; Remove-Item Env:GROQ_API_KEY   # fallback
+```
+
+**What happened**
+
+```
+200   431ms user=samer provider=groq   model=openai/gpt-oss-20b    in/out=78/76 attempts=1 target=targets[0] fallback=no  guardrail_denied=none
+446     1ms user=samer provider=groq   model=openai/gpt-oss-20b    in/out=-/-   attempts=1 target=targets[0] fallback=no  guardrail_denied=require-attribution-tags
+446     1ms user=-     provider=groq   model=openai/gpt-oss-20b    in/out=-/-   attempts=1 target=config     fallback=no  guardrail_denied=block-email-pii
+200   886ms user=samer provider=google model=gemini-3.5-flash-lite in/out=8/1   attempts=2 target=targets[1] fallback=YES guardrail_denied=none
+```
+
+- **Finding: guardrail denials triggered the fallback.** First version of the config had `strategy: {mode: fallback}` with no `on_status_codes`, so the default "any non-2xx" applied and a 446 from the metadata guardrail made the gateway try target 2 (Gemini), which was denied again (`attempts=2`, 2 ms). A policy failure is not a provider failure; retrying it on another provider is wasted work and, with a weaker guardrail on target 2, a bypass. Fix: `strategy.on_status_codes: [408, 429, 500, 502, 503, 504]`.
+- The local console does **not** store `x-portkey-metadata` (the guardrail proves the gateway parses it). The OpenAI body `user` field is the one identity that survives into the local log. Hosted Portkey indexes metadata for dashboards and filters.
+- Gemini's attempt is stored only as its native body (`usageMetadata.promptTokenCount`), so the operator script normalises token fields per provider. This is exactly the job of the gateway's log pipeline in production.
+- **Uncomfortable detail:** each log entry includes `providerOptions.apiKey` in plaintext and the full `Authorization` header in `transformedRequest`. The local log stream is a secret-bearing system; in production the log pipeline must redact before persisting, and access to raw gateway logs is a privileged role.
+
+**From log line to dashboard and budget**
+
+Each line is already a fact table row: `(timestamp, user, use_case, team, provider, model, tokens_in, tokens_out, latency, status, fallback, guardrail)`. Join with a per-model price list → cost per request; `GROUP BY use_case, day` → cost-per-use-case dashboard; `GROUP BY team` → chargeback. Add a running sum per `use_case` and compare to a limit → budget alert; reject with 429 when exceeded → budget enforcement. Count `fallback=YES` per provider per minute → provider health alert. Count `guardrail_denied` per team → policy-violation report. None of this is possible unless the `use_case`/`_user` tags are mandatory, which is why the metadata guardrail exists.
+
+**How I'd explain it in an interview**
+
+Every request through the gateway produces one structured log line with who, what for, provider, model, tokens, latency, fallback and guardrail outcome, and I made the attribution tags mandatory with a guardrail so no spend is unowned. That line is the raw material for cost-per-use-case dashboards, chargeback, budget alerts and provider health, all without touching application code. I also found that guardrail denials default to triggering fallback, which has to be switched off explicitly.
