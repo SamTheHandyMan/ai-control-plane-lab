@@ -1,0 +1,7 @@
+[
+  {"name": "customer-consent",   "owner": "Privacy Engineering",  "sla": "99.9%, refreshed hourly",  "classification": "confidential"},
+  {"name": "orders-ledger",      "owner": "Payments Platform",    "sla": "99.95%, real-time",        "classification": "restricted"},
+  {"name": "product-catalog",    "owner": "Merchandising Data",   "sla": "99.5%, refreshed daily",   "classification": "internal"},
+  {"name": "web-analytics",      "owner": "Growth Analytics",     "sla": "99.0%, refreshed daily",   "classification": "internal"},
+  {"name": "public-store-list",  "owner": "Retail Operations",    "sla": "best effort, weekly",      "classification": "public"}
+]

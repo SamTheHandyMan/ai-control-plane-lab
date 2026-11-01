@@ -181,3 +181,35 @@ Every request through the gateway produces one structured log line with who, wha
 3. I attached a pre-request regex guardrail that denied a prompt containing an email address in 1 ms without the provider ever being called, and a post-response JSON-schema guardrail that withheld a reply whose keys had drifted from the contract.
 4. I made `_user` and `use_case` tags mandatory with a metadata guardrail and tailed the gateway's log stream to print one line per request with who, provider, model, tokens, latency, which target served it, whether fallback fired, and which guardrail denied it.
 5. Along the way I found that guardrail denials trigger fallback unless `on_status_codes` is set explicitly, and that the local log entries contain provider API keys in plaintext, so the gateway's logs are a secret-bearing system that needs redaction and access control before production.
+
+---
+
+## Evening 2 — one agent, one MCP tool, one trace, one eval
+
+### Step 2.1 — A tiny MCP server
+
+Docs used: modelcontextprotocol.io/quickstart/server (Python tab) and the installed `mcp` 2.3.0 package. **Plan correction:** in mcp ≥ 2 `FastMCP` was renamed `MCPServer` (`from mcp.server import MCPServer`); result fields are snake_case (`input_schema`, `structured_content`).
+
+**Files:** `evening2-agent/catalog.json` (5 fake data products: owner, SLA, classification), `evening2-agent/catalog_server.py` (one tool `lookup_product(name)`, `mcp.run(transport="stdio")`), `evening2-agent/call_tool.py` (bare client, no LLM).
+
+**Command**
+
+```bash
+.\.venv\Scripts\python.exe call_tool.py
+```
+
+**What happened**
+
+- The client launched the server as a subprocess, did the MCP handshake (server name `data-catalog`), called `tools/list` and got one tool with a JSON schema generated from the Python signature and docstring, then called `tools/call` with `{"name": "consent"}` and got the `customer-consent` record back.
+- The server never printed anything itself: stdin/stdout carry the protocol, so a stray `print()` in a stdio server corrupts the stream.
+- The result only contains `customer-consent` because the client hard-coded the argument. From 2.2 onward the model chooses the argument.
+
+**Concepts**
+
+- **Tools / resources / prompts:** tools are functions the model may call; resources are read-only data the application can load into context; prompts are reusable templates a user picks. Tools are model-initiated, resources and prompts are application- or user-initiated.
+- **Client vs server:** the server is model-agnostic and only answers list/call; the client lives inside the AI application, owns the connection and relays the model's tool calls. The docstring and type hints *are* the interface the model sees.
+- **What an enterprise MCP gateway adds:** a *registry* (which servers exist, who published them, versioned schemas), *per-agent identity* (the agent authenticates to the gateway, not to each server; the gateway holds the downstream credentials, same pattern as the LLM gateway and provider keys), *scopes* (this agent may call `lookup_product` but not `delete_product`), *audit* (every tool call logged with who/which agent/arguments/result), plus rate limits and the ability to kill a bad server centrally. Without it every agent connects to every server with its own credentials, and nobody can answer "which agents can touch the orders ledger?".
+
+**How I'd explain it in an interview**
+
+I wrote a 30-line MCP server with one tool and a bare client that discovered and called it over stdio with no LLM involved, so I understand the protocol as plain JSON-RPC before any agent framework hides it. An MCP gateway is to tool servers what the LLM gateway is to model providers: one place for identity, scopes, audit and credentials.
